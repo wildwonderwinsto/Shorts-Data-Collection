@@ -180,23 +180,23 @@ def get_video_metadata(video_id):
     publish_date = None
     publish_time = None
 
-    # Prefer release_timestamp (scheduled publish) over timestamp (upload)
-    best_timestamp = release_timestamp or timestamp
-    best_date_str = release_date or upload_date
-
-    if best_timestamp is not None:
+    # Only use release_timestamp for exact publish time.
+    # The 'timestamp' field is often just the upload time, which is not strictly the public release time.
+    if release_timestamp is not None:
         from datetime import datetime, timezone
-        dt = datetime.fromtimestamp(best_timestamp, tz=timezone.utc)
+        dt = datetime.fromtimestamp(release_timestamp, tz=timezone.utc)
         publish_datetime = dt.strftime('%Y-%m-%d %I:%M %p UTC')
         publish_date = dt.strftime('%Y-%m-%d')
         publish_time = dt.strftime('%I:%M %p UTC')
-    elif best_date_str:
-        # Only a date available — no time
+    elif release_date or upload_date:
+        # Only a date available — no exact time
+        best_date_str = release_date or upload_date
         try:
             publish_date = f"{best_date_str[:4]}-{best_date_str[4:6]}-{best_date_str[6:8]}"
             publish_datetime = publish_date
         except (IndexError, ValueError):
             publish_date = best_date_str
+
 
     duration = info.get('duration')
 

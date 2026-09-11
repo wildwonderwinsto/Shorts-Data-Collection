@@ -10,7 +10,7 @@ import sys
 # ── Grid settings ──────────────────────────────────────────────────────────
 GRID_COLUMNS = 5
 MAX_FRAMES_PER_GRID_PART = 30  # Split grids before construction to control memory
-JPEG_QUALITY = 92
+JPEG_QUALITY = 95
 TIMESTAMP_FONT_SIZE = 28
 TIMESTAMP_PADDING = 36  # pixels below each frame for timestamp label
 
@@ -21,7 +21,6 @@ MAX_SHORT_DURATION = 180  # safety net — Shorts are typically ≤60s, YouTube 
 
 # ── Temporary file behaviour ──────────────────────────────────────────────
 KEEP_RAW_VIDEOS = False
-KEEP_AUDIO_FILES = False
 
 # ── Retry settings ────────────────────────────────────────────────────────
 MAX_RETRIES = 3

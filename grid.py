@@ -4,10 +4,13 @@ Frame extraction via FFmpeg and preview grid assembly via Pillow.
 Key design decisions:
   - Extract exactly 1 frame per second using FFmpeg (fps=1)
   - Use native resolution (prefer 1080x1920) — no downscaling
+  - Extract temporary frames as PNG (lossless) to avoid double compression
   - Split grids BEFORE construction at MAX_FRAMES_PER_GRID_PART = 30
   - Build and save one grid part at a time, then release from memory
+  - Final grid saved as JPEG quality >= 95
   - Timestamp labels drawn BELOW each frame, not overlaid on content
-  - Delete temporary frame files after grid creation
+  - Delete temporary PNG frame files after grid creation
+  - Video quality over container: do not prefer mp4 over higher resolution
 """
 
 import glob
@@ -30,11 +33,10 @@ from config import (
 
 def _get_font(size=TIMESTAMP_FONT_SIZE):
     """Get a clean font for timestamp labels. Falls back to default."""
-    # Try common Windows fonts
     font_paths = [
-        "C:/Windows/Fonts/consola.ttf",    # Consolas (monospace, clean)
-        "C:/Windows/Fonts/arial.ttf",       # Arial
-        "C:/Windows/Fonts/segoeui.ttf",     # Segoe UI
+        "C:/Windows/Fonts/consola.ttf",
+        "C:/Windows/Fonts/arial.ttf",
+        "C:/Windows/Fonts/segoeui.ttf",
     ]
     for fp in font_paths:
         if os.path.exists(fp):
@@ -42,7 +44,6 @@ def _get_font(size=TIMESTAMP_FONT_SIZE):
                 return ImageFont.truetype(fp, size)
             except Exception:
                 continue
-    # Fallback to Pillow default
     try:
         return ImageFont.truetype("arial.ttf", size)
     except Exception:
@@ -52,6 +53,7 @@ def _get_font(size=TIMESTAMP_FONT_SIZE):
 def extract_frames(video_path, output_dir):
     """
     Extract 1 frame per second from video using FFmpeg.
+    Frames are saved as lossless PNG to avoid double compression.
 
     Args:
         video_path: Path to the video file
@@ -62,14 +64,13 @@ def extract_frames(video_path, output_dir):
     """
     os.makedirs(output_dir, exist_ok=True)
 
-    frame_pattern = os.path.join(output_dir, "frame_%04d.jpg")
+    frame_pattern = os.path.join(output_dir, "frame_%04d.png")
 
     cmd = [
         "ffmpeg",
         "-i", video_path,
         "-vf", "fps=1",
-        "-q:v", "2",        # High quality JPEG
-        "-y",                # Overwrite
+        "-y",
         frame_pattern,
     ]
 
@@ -78,7 +79,7 @@ def extract_frames(video_path, output_dir):
             cmd,
             capture_output=True,
             text=True,
-            timeout=300,  # 5 minute timeout
+            timeout=300,
         )
         if result.returncode != 0:
             print(f"    [!] FFmpeg frame extraction failed: {result.stderr[:500]}")
@@ -91,7 +92,7 @@ def extract_frames(video_path, output_dir):
         return []
 
     # Collect and sort frame files
-    frames = sorted(glob.glob(os.path.join(output_dir, "frame_*.jpg")))
+    frames = sorted(glob.glob(os.path.join(output_dir, "frame_*.png")))
     return frames
 
 
@@ -126,13 +127,11 @@ def build_preview_grids(frame_paths, output_path_base):
         if not part_frames:
             continue
 
-        # Determine output filename
         if num_parts == 1:
             grid_path = output_path_base + ".jpg"
         else:
             grid_path = f"{output_path_base}_part{part_idx + 1:02d}.jpg"
 
-        # Build this part
         _build_single_grid(part_frames, grid_path, start, font)
         saved_paths.append(grid_path)
 
@@ -154,7 +153,6 @@ def _build_single_grid(frame_paths, output_path, time_offset, font):
     if not frame_paths:
         return
 
-    # Read the first frame to get dimensions
     with Image.open(frame_paths[0]) as sample:
         frame_w, frame_h = sample.size
 
@@ -162,15 +160,12 @@ def _build_single_grid(frame_paths, output_path, time_offset, font):
     num_frames = len(frame_paths)
     rows = math.ceil(num_frames / cols)
 
-    # Cell dimensions: frame + padding below for timestamp
     cell_w = frame_w
     cell_h = frame_h + TIMESTAMP_PADDING
 
-    # Total grid dimensions
     grid_w = cols * cell_w
     grid_h = rows * cell_h
 
-    # Create grid image (white background)
     grid_img = Image.new('RGB', (grid_w, grid_h), color=(255, 255, 255))
     draw = ImageDraw.Draw(grid_img)
 
@@ -181,10 +176,8 @@ def _build_single_grid(frame_paths, output_path, time_offset, font):
         x = col * cell_w
         y = row * cell_h
 
-        # Paste the frame
         try:
             with Image.open(frame_path) as frame:
-                # Resize only if frame dimensions don't match the first frame
                 if frame.size != (frame_w, frame_h):
                     frame = frame.resize((frame_w, frame_h), Image.LANCZOS)
                 grid_img.paste(frame, (x, y))
@@ -192,13 +185,11 @@ def _build_single_grid(frame_paths, output_path, time_offset, font):
             print(f"    [!] Failed to paste frame {frame_path}: {e}")
             continue
 
-        # Draw timestamp below the frame
         second = time_offset + i
         minutes = second // 60
         secs = second % 60
         timestamp = f"{minutes:02d}:{secs:02d}"
 
-        # Center the timestamp text under the frame
         try:
             bbox = font.getbbox(timestamp)
             text_w = bbox[2] - bbox[0]
@@ -206,14 +197,13 @@ def _build_single_grid(frame_paths, output_path, time_offset, font):
             text_w = len(timestamp) * (TIMESTAMP_FONT_SIZE // 2)
 
         text_x = x + (frame_w - text_w) // 2
-        text_y = y + frame_h + 4  # 4px padding from bottom of frame
+        text_y = y + frame_h + 4
 
         draw.text((text_x, text_y), timestamp, fill=(0, 0, 0), font=font)
 
-    # Save with high quality
+    # Save with high quality (>= 95)
     grid_img.save(output_path, 'JPEG', quality=JPEG_QUALITY, optimize=True)
 
-    # Explicitly release memory
     del draw
     del grid_img
 
@@ -227,11 +217,12 @@ def cleanup_frames(frames_dir):
             print(f"    [!] Failed to clean up frames directory: {e}")
 
 
-def download_video(video_id, output_dir, keep_video=False):
+def download_video(video_id, output_dir):
     """
     Download a Short temporarily for frame extraction.
 
-    Prefers native 1080x1920 or better.
+    Prioritizes video quality over container format.
+    Does NOT prefer mp4 over higher-resolution alternatives.
     Returns: video_path to downloaded file, or None on failure.
     """
     import yt_dlp
@@ -239,15 +230,12 @@ def download_video(video_id, output_dir, keep_video=False):
     url = f"https://www.youtube.com/shorts/{video_id}"
     os.makedirs(output_dir, exist_ok=True)
 
-    video_path = os.path.join(output_dir, f"{video_id}_video.mp4")
-
-    # Download best video+audio merged, prefer 1080p+
     ydl_opts = {
-        'format': 'bestvideo[height>=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+        'format': 'bestvideo[height>=1080]+bestaudio/bestvideo+bestaudio/best',
         'outtmpl': os.path.join(output_dir, f"{video_id}_video.%(ext)s"),
         'quiet': True,
         'no_warnings': True,
-        'merge_output_format': 'mp4',
+        'merge_output_format': 'mkv',
     }
 
     try:
@@ -258,25 +246,19 @@ def download_video(video_id, output_dir, keep_video=False):
         return None
 
     # Find the actual downloaded file (extension may vary)
-    import glob as g
-    video_files = g.glob(os.path.join(output_dir, f"{video_id}_video.*"))
-    actual_video = None
+    video_files = glob.glob(os.path.join(output_dir, f"{video_id}_video.*"))
     for vf in video_files:
         if os.path.isfile(vf):
-            actual_video = vf
-            break
+            return vf
 
-    return actual_video
+    return None
 
 
 def cleanup_downloads(output_dir, video_id, keep_video=False):
     """Remove temporary video files after processing."""
-    import glob as g
-
     if not keep_video:
-        for f in g.glob(os.path.join(output_dir, f"{video_id}_video.*")):
+        for f in glob.glob(os.path.join(output_dir, f"{video_id}_video.*")):
             try:
                 os.remove(f)
             except Exception:
                 pass
-

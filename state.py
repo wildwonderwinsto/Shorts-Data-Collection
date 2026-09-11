@@ -1,7 +1,8 @@
 """
 Scan state persistence and resume logic.
-Tracks completed video IDs, assigned numbers, and failures.
+Tracks completed video IDs, assigned numbers, failures, and per-output status.
 Enables resuming interrupted scans and incremental updates.
+Failed/incomplete Shorts are automatically retried on the next scan.
 """
 
 import json
@@ -43,11 +44,9 @@ def save_state(channel_dir, state):
     """Persist the scan state to disk."""
     state["last_scan_timestamp"] = datetime.now(timezone.utc).isoformat()
     path = get_state_path(channel_dir)
-    # Write to temp file first, then rename for atomic write
     tmp_path = path + ".tmp"
     with open(tmp_path, 'w', encoding='utf-8') as f:
         json.dump(state, f, indent=2, ensure_ascii=False, default=str)
-    # On Windows, os.replace is atomic
     os.replace(tmp_path, path)
 
 
@@ -56,30 +55,63 @@ def is_video_complete(state, video_id):
     return video_id in state["completed_video_ids"]
 
 
-def mark_video_complete(state, video_id, video_number):
-    """Mark a video as successfully completed."""
+def mark_video_complete(state, video_id, video_number, output_status=None):
+    """
+    Mark a video as successfully completed.
+
+    Args:
+        state: scan state dict
+        video_id: YouTube video ID
+        video_number: assigned sequential number
+        output_status: optional dict with per-output status, e.g.
+            {'metadata': 'complete', 'transcript': 'unavailable', 'grid': 'complete'}
+    """
     if video_id not in state["completed_video_ids"]:
         state["completed_video_ids"].append(video_id)
-    state["videos"][video_id] = {
+
+    video_entry = {
         "video_number": video_number,
         "status": "complete",
     }
-    # Update next_video_number if needed
+    if output_status:
+        video_entry["output_status"] = output_status
+
+    state["videos"][video_id] = video_entry
+
     if video_number >= state["next_video_number"]:
         state["next_video_number"] = video_number + 1
+
     # Remove from failed if it was there
     state["failed_video_ids"].pop(video_id, None)
 
 
-def mark_video_failed(state, video_id, video_number, reason):
-    """Record that a video failed processing (but still mark partial completion)."""
+def mark_video_failed(state, video_id, video_number, reason, output_status=None):
+    """
+    Record that a video failed processing.
+    Preserves the video_number so it can be retried with the same number.
+    Does NOT add to completed_video_ids so it will be retried on next scan.
+
+    Args:
+        state: scan state dict
+        video_id: YouTube video ID
+        video_number: assigned sequential number (preserved for retry)
+        reason: string describing what failed
+        output_status: optional dict with per-output status, e.g.
+            {'metadata': 'complete', 'transcript': 'unavailable', 'grid': 'failed'}
+    """
     state["failed_video_ids"][video_id] = reason
-    state["videos"][video_id] = {
+
+    video_entry = {
         "video_number": video_number,
         "status": "failed",
         "reason": reason,
     }
-    # Still advance the number counter
+    if output_status:
+        video_entry["output_status"] = output_status
+
+    state["videos"][video_id] = video_entry
+
+    # Advance the number counter so the number is reserved
     if video_number >= state["next_video_number"]:
         state["next_video_number"] = video_number + 1
 

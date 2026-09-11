@@ -12,7 +12,13 @@ YouTubeResearch/
 *_preview_grid.jpg
 *_transcript.txt
 *.csv
+_temp*/
 
 # System
 .DS_Store
 Thumbs.db
+*
+*.exe
+ffmpeg.exe
+ffprobe.exe
+ffplay.exe

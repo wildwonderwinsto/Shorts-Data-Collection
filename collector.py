@@ -2,16 +2,18 @@
 Per-Short data collection orchestrator.
 
 Processes one Short at a time:
-  1. Check scan state → skip if complete
+  1. Check scan state -> skip if complete
   2. Fetch detailed metadata
-  3. Save info.json
-  4. Fetch transcript (YouTube API → UNAVAILABLE)
-  5. Download video only if needed (for grid)
-  6. Extract frames and build preview grid
-  7. Clean up temporary files
-  8. Update scan state
+  3. Apply date filtering (--start-date / --end-date)
+  4. Save info.json
+  5. Fetch transcript (YouTube captions only -> UNAVAILABLE)
+  6. Download video only if needed (for grid)
+  7. Extract frames and build preview grid
+  8. Clean up temporary files (guaranteed via try/finally)
+  9. Update scan state — only mark complete when ALL outputs succeeded
 
 Transcript failure does NOT block grid generation.
+A Short is only marked complete if all enabled outputs exist.
 """
 
 import os
@@ -46,6 +48,22 @@ from state import (
 )
 
 
+def _is_within_date_range(publish_date, start_date, end_date):
+    """
+    Check if a publish_date (YYYY-MM-DD string) falls within the given range.
+    Returns True if within range or if publish_date is unavailable.
+    """
+    if not publish_date:
+        # Cannot filter without a date — include by default
+        return True
+
+    if start_date and publish_date < start_date:
+        return False
+    if end_date and publish_date > end_date:
+        return False
+    return True
+
+
 def process_short(video_info, channel_dir, state, args, current_idx, total_count):
     """
     Process a single Short: metadata, transcript, preview grid.
@@ -72,7 +90,6 @@ def process_short(video_info, channel_dir, state, args, current_idx, total_count
     prefix = make_video_prefix(video_number, video_id)
 
     print(f"\n[{current_idx}/{total_count}]")
-    # Safe print to handle emojis in Windows terminal
     title_str = video_info.get('title', 'Untitled')[:50]
     safe_title = title_str.encode(sys.stdout.encoding or 'utf-8', errors='replace').decode(sys.stdout.encoding or 'utf-8')
     print(f"\n{prefix}_{safe_title}")
@@ -91,17 +108,36 @@ def process_short(video_info, channel_dir, state, args, current_idx, total_count
                 print(f"RETRY ({wait}s)...", end="", flush=True)
                 time.sleep(wait)
             else:
-                print(f"FAILED")
+                print("FAILED")
                 print(f"    [!] Metadata fetch failed: {e}")
                 mark_video_failed(state, video_id, video_number, f"metadata: {e}")
                 save_state(channel_dir, state)
                 return None
 
-    # Add video_number to metadata
     metadata['video_number'] = video_number
     print("DONE")
 
-    # Create folder
+    # ── Step 2: Date filtering ─────────────────────────────────────────
+    publish_date = metadata.get('publish_date')
+    start_date = getattr(args, 'start_date', None)
+    end_date = getattr(args, 'end_date', None)
+
+    if not _is_within_date_range(publish_date, start_date, end_date):
+        reason = []
+        if start_date:
+            reason.append(f">= {start_date}")
+        if end_date:
+            reason.append(f"<= {end_date}")
+        print(f"    SKIPPED (date {publish_date} outside range: {', '.join(reason)})")
+        # Mark as skipped-by-date so it isn't retried but also isn't "complete"
+        state["videos"][video_id] = {
+            "video_number": video_number,
+            "status": "skipped_date",
+        }
+        save_state(channel_dir, state)
+        return None
+
+    # ── Step 3: Create folder and save info.json ───────────────────────
     title = metadata.get('title', video_info.get('title', 'Untitled'))
     folder_name = make_folder_name(video_number, video_id, title)
     folder_name = ensure_path_length(
@@ -109,7 +145,6 @@ def process_short(video_info, channel_dir, state, args, current_idx, total_count
     )
     short_dir = create_short_dir(channel_dir, folder_name)
 
-    # Save info.json
     info_data = {
         'video_number': video_number,
         'video_id': video_id,
@@ -128,85 +163,100 @@ def process_short(video_info, channel_dir, state, args, current_idx, total_count
     }
     save_info_json(short_dir, prefix, info_data)
 
-    # ── Step 2: Transcript ─────────────────────────────────────────────
+    # ── Step 4: Transcript ─────────────────────────────────────────────
     transcript_available = False
     transcript_text = "TRANSCRIPT UNAVAILABLE"
 
     if not args.skip_transcripts:
         print("    Transcript     ", end="", flush=True)
-
-        # Try YouTube captions (no download needed)
         transcript_text, transcript_available = get_transcript(video_id)
+        if not transcript_available:
+            print("UNAVAILABLE")
     else:
         print("    Transcript      SKIPPED")
 
-    # ── Step 3: Download video (if needed for grid) ─────────
-    video_path = None
-    needs_download = not args.skip_grid
-
-    if needs_download:
-        print("    Download       ", end="", flush=True)
-        for attempt in range(MAX_RETRIES):
-            try:
-                video_path = download_video(
-                    video_id, short_dir,
-                    keep_video=args.keep_videos,
-                )
-                if video_path:
-                    print("DONE")
-                    break
-                else:
-                    raise Exception("Download returned no file")
-            except Exception as e:
-                if attempt < MAX_RETRIES - 1:
-                    wait = RETRY_BACKOFF_BASE ** (attempt + 1)
-                    print(f"RETRY ({wait}s)...", end="", flush=True)
-                    time.sleep(wait)
-                else:
-                    print("FAILED")
-                    print(f"    [!] Video download failed after {MAX_RETRIES} attempts: {e}")
-
     # Save transcript file (always created, even if UNAVAILABLE)
     save_transcript(short_dir, prefix, transcript_text)
-    if not args.skip_transcripts:
-        status = "DONE" if transcript_available else "UNAVAILABLE"
-        if not transcript_available:
-            print(f"    Transcript      {status}")
 
-    # ── Step 4: Frame extraction and grid ──────────────────────────────
+    # ── Step 5: Download, extract frames, build grid ───────────────────
+    # Track success for completion logic
+    grid_required = not args.skip_grid
+    grid_success = not grid_required  # True if grid is not required
+
+    video_path = None
+    frames_dir = os.path.join(short_dir, "_temp_frames")
     grid_paths = []
-    if not args.skip_grid and video_path and os.path.exists(video_path):
-        print("    1 FPS Frames   ", end="", flush=True)
-        frames_dir = os.path.join(short_dir, "_temp_frames")
-        frame_paths = extract_frames(video_path, frames_dir)
 
-        if frame_paths:
-            print(f"DONE ({len(frame_paths)} frames)")
+    if grid_required:
+        try:
+            # Download video
+            print("    Download       ", end="", flush=True)
+            for attempt in range(MAX_RETRIES):
+                try:
+                    video_path = download_video(video_id, short_dir)
+                    if video_path:
+                        print("DONE")
+                        break
+                    else:
+                        raise Exception("Download returned no file")
+                except Exception as e:
+                    if attempt < MAX_RETRIES - 1:
+                        wait = RETRY_BACKOFF_BASE ** (attempt + 1)
+                        print(f"RETRY ({wait}s)...", end="", flush=True)
+                        time.sleep(wait)
+                    else:
+                        print("FAILED")
+                        print(f"    [!] Video download failed after {MAX_RETRIES} attempts: {e}")
 
-            print("    Preview Grid   ", end="", flush=True)
-            grid_base = os.path.join(short_dir, f"{prefix}_preview_grid")
-            grid_paths = build_preview_grids(frame_paths, grid_base)
-            print(f"DONE ({len(grid_paths)} part{'s' if len(grid_paths) != 1 else ''})")
+            # Extract frames
+            if video_path and os.path.exists(video_path):
+                print("    1 FPS Frames   ", end="", flush=True)
+                frame_paths = extract_frames(video_path, frames_dir)
 
-            # Clean up temporary frames
+                if frame_paths:
+                    print(f"DONE ({len(frame_paths)} frames)")
+
+                    # Build grids
+                    print("    Preview Grid   ", end="", flush=True)
+                    grid_base = os.path.join(short_dir, f"{prefix}_preview_grid")
+                    grid_paths = build_preview_grids(frame_paths, grid_base)
+
+                    if grid_paths:
+                        print(f"DONE ({len(grid_paths)} part{'s' if len(grid_paths) != 1 else ''})")
+                        grid_success = True
+                    else:
+                        print("FAILED")
+                else:
+                    print("FAILED")
+                    print("    Preview Grid    SKIPPED (no frames extracted)")
+            else:
+                print("    Preview Grid    SKIPPED (no video)")
+
+        finally:
+            # Guaranteed cleanup of temporary files
             print("    Cleanup        ", end="", flush=True)
             cleanup_frames(frames_dir)
+            if video_path:
+                cleanup_downloads(short_dir, video_id,
+                                  keep_video=args.keep_videos)
             print("DONE")
-        else:
-            print("FAILED")
-            print("    Preview Grid    SKIPPED (no frames extracted)")
-    elif args.skip_grid:
+    else:
         print("    Preview Grid    SKIPPED")
-    elif not video_path:
-        print("    Preview Grid    SKIPPED (no video)")
 
-    # ── Step 5: Cleanup downloads ──────────────────────────────────────
-    if video_path:
-        cleanup_downloads(short_dir, video_id,
-                         keep_video=args.keep_videos)
+    # ── Step 6: Mark completion based on actual results ────────────────
+    if grid_success:
+        mark_video_complete(state, video_id, video_number, {
+            'metadata': 'complete',
+            'transcript': 'complete' if transcript_available else 'unavailable',
+            'grid': 'complete' if grid_required else 'skipped',
+        })
+    else:
+        mark_video_failed(state, video_id, video_number, "grid_failed", {
+            'metadata': 'complete',
+            'transcript': 'complete' if transcript_available else 'unavailable',
+            'grid': 'failed',
+        })
 
-    # ── Mark complete ─────────────────────────────────────────────────
-    mark_video_complete(state, video_id, video_number)
     save_state(channel_dir, state)
 
     # Build result for CSV generation

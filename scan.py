@@ -31,24 +31,6 @@ from files import (
 from collector import process_short
 
 
-def filter_by_date(shorts, state, start_date=None, end_date=None):
-    """
-    Filter shorts by date range using existing state data or listing data.
-    Only filters if dates were specified via CLI.
-    """
-    if not start_date and not end_date:
-        return shorts
-
-    filtered = []
-    for s in shorts:
-        # Try to get publish date from state if previously processed
-        vid_info = state.get("videos", {}).get(s['video_id'], {})
-        # We can't reliably filter by date without metadata (which requires per-video fetch).
-        # For now, include all and let metadata fetch handle it.
-        # Date filtering will be applied after metadata is available.
-        filtered.append(s)
-
-    return filtered
 
 
 def load_existing_results(channel_dir, state):
@@ -179,8 +161,7 @@ def main():
 
     state['total_shorts_found'] = len(shorts)
 
-    # ── Filter by date if specified ──────────────────────────────────
-    shorts = filter_by_date(shorts, state, args.start_date, args.end_date)
+    # Date filtering will occur during processing (after metadata fetch).
 
     # ── Determine which Shorts need processing ───────────────────────
     if args.force:
