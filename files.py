@@ -137,31 +137,234 @@ def generate_titles_csv(channel_dir, videos):
 
 def generate_shorts_csv(channel_dir, videos):
     """
-    Generate shorts.csv — the master CSV with all columns including file paths.
+    Generate master CSV containing metadata AND full transcript.
     """
     path = os.path.join(channel_dir, "shorts.csv")
+
     fieldnames = [
-        'video_number', 'video_id', 'title', 'url',
-        'publish_datetime', 'publish_date', 'publish_time',
-        'duration_seconds', 'transcript_available',
-        'folder_path', 'transcript_path', 'preview_grid_path'
+        'video_number',
+        'video_id',
+        'title',
+        'url',
+        'publish_datetime',
+        'publish_date',
+        'publish_time',
+        'duration_seconds',
+        'transcript_available',
+        'transcript',
+        'folder_path',
+        'transcript_path',
+        'preview_grid_path',
     ]
-    with open(path, 'w', encoding='utf-8', newline='') as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
+
+    with open(
+        path,
+        'w',
+        encoding='utf-8-sig',
+        newline=''
+    ) as f:
+
+        writer = csv.DictWriter(
+            f,
+            fieldnames=fieldnames,
+            quoting=csv.QUOTE_MINIMAL
+        )
+
         writer.writeheader()
+
         for v in videos:
             writer.writerow({
-                'video_number': f"{v['video_number']:04d}",
-                'video_id': v['video_id'],
-                'title': v['title'],
-                'url': v['url'],
-                'publish_datetime': v.get('publish_datetime', ''),
-                'publish_date': v.get('publish_date', ''),
-                'publish_time': v.get('publish_time', ''),
-                'duration_seconds': v.get('duration_seconds', ''),
-                'transcript_available': v.get('transcript_available', False),
-                'folder_path': v.get('folder_path', ''),
-                'transcript_path': v.get('transcript_path', ''),
-                'preview_grid_path': v.get('preview_grid_path', ''),
+                'video_number':
+                    f"{v['video_number']:04d}",
+
+                'video_id':
+                    v['video_id'],
+
+                'title':
+                    v['title'],
+
+                'url':
+                    v['url'],
+
+                'publish_datetime':
+                    v.get('publish_datetime', ''),
+
+                'publish_date':
+                    v.get('publish_date', ''),
+
+                'publish_time':
+                    v.get('publish_time', ''),
+
+                'duration_seconds':
+                    v.get('duration_seconds', ''),
+
+                'transcript_available':
+                    v.get('transcript_available', False),
+
+                'transcript':
+                    v.get(
+                        'transcript',
+                        'TRANSCRIPT UNAVAILABLE'
+                    ),
+
+                'folder_path':
+                    v.get('folder_path', ''),
+
+                'transcript_path':
+                    v.get('transcript_path', ''),
+
+                'preview_grid_path':
+                    v.get('preview_grid_path', ''),
             })
+
+    return path
+
+
+def generate_all_shorts_txt(channel_dir, videos):
+    """
+    Create one easy-to-copy text file containing all collected Shorts data.
+    """
+    path = os.path.join(channel_dir, "ALL_SHORTS_DATA.txt")
+
+    with open(path, "w", encoding="utf-8") as f:
+        for v in sorted(videos, key=lambda x: x["video_number"]):
+
+            number = f"{v['video_number']:04d}"
+
+            f.write("=" * 70 + "\n")
+            f.write(f"SHORT {number}\n")
+            f.write("=" * 70 + "\n\n")
+
+            f.write(f"VIDEO ID: {v.get('video_id', '')}\n")
+            f.write(f"TITLE: {v.get('title', '')}\n")
+            f.write(f"URL: {v.get('url', '')}\n")
+
+            f.write(
+                f"PUBLISH DATE: "
+                f"{v.get('publish_date') or 'UNAVAILABLE'}\n"
+            )
+
+            f.write(
+                f"PUBLISH TIME: "
+                f"{v.get('publish_time') or 'UNAVAILABLE'}\n"
+            )
+
+            f.write(
+                f"PUBLISH DATETIME: "
+                f"{v.get('publish_datetime') or 'UNAVAILABLE'}\n"
+            )
+
+            f.write(
+                f"DURATION: "
+                f"{v.get('duration_seconds') or 'UNAVAILABLE'} seconds\n"
+            )
+
+            f.write("\nTRANSCRIPT:\n")
+
+            transcript = v.get(
+                "transcript",
+                "TRANSCRIPT UNAVAILABLE"
+            )
+
+            if not transcript:
+                transcript = "TRANSCRIPT UNAVAILABLE"
+
+            f.write(transcript.strip() + "\n")
+
+            f.write("\nPREVIEW GRID:\n")
+
+            grid_paths = v.get("preview_grid_path", "")
+
+            if grid_paths:
+                for grid_path in grid_paths.split(";"):
+                    grid_path = grid_path.strip()
+
+                    if not grid_path:
+                        continue
+
+                    try:
+                        relative = os.path.relpath(
+                            grid_path,
+                            channel_dir
+                        )
+                    except ValueError:
+                        relative = grid_path
+
+                    f.write(relative + "\n")
+            else:
+                f.write("UNAVAILABLE\n")
+
+            f.write("\n\n")
+
+    return path
+
+
+def generate_all_shorts_md(channel_dir, videos):
+    """
+    Create a Markdown version with clickable/displayable preview grids.
+    """
+    path = os.path.join(channel_dir, "ALL_SHORTS_DATA.md")
+
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("# YouTube Shorts Data\n\n")
+
+        for v in sorted(videos, key=lambda x: x["video_number"]):
+
+            number = f"{v['video_number']:04d}"
+
+            f.write(f"# Short {number}\n\n")
+
+            f.write(f"**Video ID:** {v.get('video_id', '')}  \n")
+            f.write(f"**Title:** {v.get('title', '')}  \n")
+            f.write(f"**URL:** {v.get('url', '')}  \n")
+
+            f.write(
+                f"**Publish Date:** "
+                f"{v.get('publish_date') or 'UNAVAILABLE'}  \n"
+            )
+
+            f.write(
+                f"**Publish Time:** "
+                f"{v.get('publish_time') or 'UNAVAILABLE'}  \n"
+            )
+
+            f.write(
+                f"**Duration:** "
+                f"{v.get('duration_seconds') or 'UNAVAILABLE'} seconds  \n"
+            )
+
+            f.write("\n## Transcript\n\n")
+
+            transcript = v.get(
+                "transcript",
+                "TRANSCRIPT UNAVAILABLE"
+            )
+
+            if not transcript:
+                transcript = "TRANSCRIPT UNAVAILABLE"
+
+            f.write(transcript.strip() + "\n\n")
+
+            f.write("## Preview Grid\n\n")
+
+            grid_paths = v.get("preview_grid_path", "")
+
+            if grid_paths:
+                for grid_path in grid_paths.split(";"):
+                    grid_path = grid_path.strip()
+
+                    if not grid_path:
+                        continue
+
+                    relative = os.path.relpath(
+                        grid_path,
+                        channel_dir
+                    ).replace("\\", "/")
+
+                    f.write(f"![Preview Grid]({relative})\n\n")
+            else:
+                f.write("UNAVAILABLE\n\n")
+
+            f.write("---\n\n")
+
     return path

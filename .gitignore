@@ -22,3 +22,8 @@ Thumbs.db
 ffmpeg.exe
 ffprobe.exe
 ffplay.exe
+
+.env
+.env.example
+.env.*
+

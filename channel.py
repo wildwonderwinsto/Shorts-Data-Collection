@@ -4,8 +4,14 @@ Resolves channel URLs, @handles, and channel IDs.
 Lists all Shorts from a channel's /shorts tab using yt-dlp.
 """
 
+import json
+import os
 import re
 import sys
+import urllib.parse
+import urllib.request
+from datetime import datetime, timezone
+
 import yt_dlp
 
 from config import MAX_SHORT_DURATION
@@ -151,73 +157,153 @@ def list_shorts(shorts_url, max_videos=None):
     return shorts
 
 
+def _get_youtube_published_at(video_id):
+    """
+    Get the official YouTube publishedAt timestamp using YouTube Data API v3.
+
+    Reads API key from environment variable:
+        YOUTUBE_API_KEY
+
+    Returns RFC3339 timestamp like:
+        2026-02-07T01:05:00Z
+
+    Returns None if:
+    - no API key is configured
+    - API request fails
+    - video is unavailable
+    """
+    api_key = os.environ.get("YOUTUBE_API_KEY")
+
+    if not api_key:
+        return None
+
+    params = urllib.parse.urlencode({
+        "part": "snippet",
+        "id": video_id,
+        "key": api_key,
+    })
+
+    url = f"https://www.googleapis.com/youtube/v3/videos?{params}"
+
+    try:
+        with urllib.request.urlopen(url, timeout=15) as response:
+            data = json.loads(response.read().decode("utf-8"))
+
+        items = data.get("items", [])
+        if not items:
+            return None
+
+        return items[0].get("snippet", {}).get("publishedAt")
+
+    except Exception as e:
+        print(f"    [!] YouTube Data API publish time unavailable: {e}")
+        return None
+
+
 def get_video_metadata(video_id):
     """
-    Fetch detailed metadata for a single video using yt-dlp.
+    Fetch metadata using yt-dlp.
 
-    Returns all raw date fields plus standard metadata.
-    Never invents timestamps or converts relative dates.
+    For the actual publish date/time:
+    1. Prefer YouTube Data API snippet.publishedAt
+    2. Fall back to yt-dlp release_timestamp
+    3. Fall back to date-only release_date/upload_date
+
+    Never invents a publish time.
     """
     url = f"https://www.youtube.com/shorts/{video_id}"
 
     ydl_opts = {
-        'quiet': True,
-        'no_warnings': True,
-        'skip_download': True,
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
 
-    # Extract all available date/time fields — never fabricate
-    timestamp = info.get('timestamp')            # Unix epoch of upload/publish
-    upload_date = info.get('upload_date')         # YYYYMMDD string
-    release_timestamp = info.get('release_timestamp')  # Unix epoch of scheduled release
-    release_date = info.get('release_date')       # YYYYMMDD string
+    # Raw yt-dlp fields
+    timestamp = info.get("timestamp")
+    upload_date = info.get("upload_date")
+    release_timestamp = info.get("release_timestamp")
+    release_date = info.get("release_date")
 
-    # Determine the best publish date/time
+    # Official YouTube API value
+    youtube_published_at = _get_youtube_published_at(video_id)
+
     publish_datetime = None
     publish_date = None
     publish_time = None
+    publish_source = None
 
-    # Only use release_timestamp for exact publish time.
-    # The 'timestamp' field is often just the upload time, which is not strictly the public release time.
-    if release_timestamp is not None:
-        from datetime import datetime, timezone
-        dt = datetime.fromtimestamp(release_timestamp, tz=timezone.utc)
-        publish_datetime = dt.strftime('%Y-%m-%d %I:%M %p UTC')
-        publish_date = dt.strftime('%Y-%m-%d')
-        publish_time = dt.strftime('%I:%M %p UTC')
-    elif release_date or upload_date:
-        # Only a date available — no exact time
-        best_date_str = release_date or upload_date
+    # BEST SOURCE: official YouTube publishedAt
+    if youtube_published_at:
         try:
-            publish_date = f"{best_date_str[:4]}-{best_date_str[4:6]}-{best_date_str[6:8]}"
-            publish_datetime = publish_date
-        except (IndexError, ValueError):
-            publish_date = best_date_str
+            dt = datetime.fromisoformat(
+                youtube_published_at.replace("Z", "+00:00")
+            ).astimezone(timezone.utc)
 
+            publish_datetime = dt.strftime("%Y-%m-%d %I:%M:%S %p UTC")
+            publish_date = dt.strftime("%Y-%m-%d")
+            publish_time = dt.strftime("%I:%M:%S %p UTC")
+            publish_source = "youtube_data_api_publishedAt"
 
-    duration = info.get('duration')
+        except ValueError:
+            pass
 
-    metadata = {
-        'video_id': video_id,
-        'title': info.get('title', 'Untitled'),
-        'url': url,
-        'duration_seconds': duration,
-        'channel_id': info.get('channel_id', ''),
-        'channel_name': info.get('channel', '') or info.get('uploader', ''),
+    # SECOND CHOICE: yt-dlp release timestamp
+    if publish_datetime is None and release_timestamp is not None:
+        dt = datetime.fromtimestamp(
+            release_timestamp,
+            tz=timezone.utc
+        )
 
-        # All raw date fields from yt-dlp — stored as-is
-        'raw_timestamp': timestamp,
-        'raw_upload_date': upload_date,
-        'raw_release_timestamp': release_timestamp,
-        'raw_release_date': release_date,
+        publish_datetime = dt.strftime("%Y-%m-%d %I:%M:%S %p UTC")
+        publish_date = dt.strftime("%Y-%m-%d")
+        publish_time = dt.strftime("%I:%M:%S %p UTC")
+        publish_source = "yt_dlp_release_timestamp"
 
-        # Derived (never invented)
-        'publish_datetime': publish_datetime,
-        'publish_date': publish_date,
-        'publish_time': publish_time,
+    # LAST CHOICE: date only
+    if publish_date is None:
+        best_date_str = release_date or upload_date
+
+        if best_date_str:
+            try:
+                publish_date = (
+                    f"{best_date_str[:4]}-"
+                    f"{best_date_str[4:6]}-"
+                    f"{best_date_str[6:8]}"
+                )
+                publish_datetime = publish_date
+                publish_source = (
+                    "yt_dlp_release_date"
+                    if release_date
+                    else "yt_dlp_upload_date"
+                )
+            except (IndexError, ValueError):
+                publish_date = best_date_str
+
+    return {
+        "video_id": video_id,
+        "title": info.get("title", "Untitled"),
+        "url": url,
+        "duration_seconds": info.get("duration"),
+        "channel_id": info.get("channel_id", ""),
+        "channel_name": info.get("channel", "")
+        or info.get("uploader", ""),
+
+        # Official YouTube value
+        "youtube_published_at": youtube_published_at,
+
+        # Raw yt-dlp values
+        "raw_timestamp": timestamp,
+        "raw_upload_date": upload_date,
+        "raw_release_timestamp": release_timestamp,
+        "raw_release_date": release_date,
+
+        # Final values
+        "publish_datetime": publish_datetime,
+        "publish_date": publish_date,
+        "publish_time": publish_time,
+        "publish_source": publish_source,
     }
-
-    return metadata

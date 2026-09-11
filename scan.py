@@ -17,6 +17,12 @@ import json
 import traceback
 from datetime import datetime, timezone
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 from config import parse_args, interactive_prompt
 from channel import resolve_channel_url, get_channel_info, list_shorts
 from state import load_state, save_state, is_video_complete, assign_number
@@ -25,6 +31,8 @@ from files import (
     generate_titles_txt,
     generate_titles_csv,
     generate_shorts_csv,
+    generate_all_shorts_txt,
+    generate_all_shorts_md,
     make_video_prefix,
     make_folder_name,
 )
@@ -74,10 +82,26 @@ def load_existing_results(channel_dir, state):
         # Check transcript
         transcript_path = os.path.join(found_dir, f"{prefix}_transcript.txt")
         transcript_available = False
+        transcript_text = "TRANSCRIPT UNAVAILABLE"
+
         if os.path.exists(transcript_path):
-            with open(transcript_path, 'r', encoding='utf-8') as f:
-                content = f.read().strip()
-                transcript_available = content != "TRANSCRIPT UNAVAILABLE"
+            try:
+                with open(
+                    transcript_path,
+                    'r',
+                    encoding='utf-8'
+                ) as f:
+                    transcript_text = f.read().strip()
+
+                if not transcript_text:
+                    transcript_text = "TRANSCRIPT UNAVAILABLE"
+
+                transcript_available = (
+                    transcript_text != "TRANSCRIPT UNAVAILABLE"
+                )
+
+            except Exception:
+                transcript_text = "TRANSCRIPT UNAVAILABLE"
 
         # Find grid paths
         import glob
@@ -94,6 +118,7 @@ def load_existing_results(channel_dir, state):
             'publish_time': info.get('publish_time', ''),
             'duration_seconds': info.get('duration_seconds', ''),
             'transcript_available': transcript_available,
+            'transcript': transcript_text,
             'folder_path': found_dir,
             'transcript_path': transcript_path,
             'preview_grid_path': grid_path_str,
@@ -182,7 +207,9 @@ def main():
             generate_titles_txt(channel_dir, all_results)
             generate_titles_csv(channel_dir, all_results)
             generate_shorts_csv(channel_dir, all_results)
-            print("CSV files updated.")
+            generate_all_shorts_txt(channel_dir, all_results)
+            generate_all_shorts_md(channel_dir, all_results)
+            print("CSV and text files updated.")
         sys.exit(0)
 
     # ── Assign numbers to all Shorts (preserving existing) ───────────
@@ -230,10 +257,13 @@ def main():
         titles_txt_path = generate_titles_txt(channel_dir, all_results)
         titles_csv_path = generate_titles_csv(channel_dir, all_results)
         shorts_csv_path = generate_shorts_csv(channel_dir, all_results)
+        generate_all_shorts_txt(channel_dir, all_results)
+        generate_all_shorts_md(channel_dir, all_results)
 
         print(f"  titles.txt    — {len(all_results)} titles")
         print(f"  titles.csv    — {len(all_results)} rows")
         print(f"  shorts.csv    — {len(all_results)} rows")
+        print(f"  ALL_SHORTS_DATA.txt — {len(all_results)} shorts")
 
     save_state(channel_dir, state)
 

@@ -153,13 +153,18 @@ def process_short(video_info, channel_dir, state, args, current_idx, total_count
         'duration_seconds': metadata.get('duration_seconds'),
         'channel_id': metadata.get('channel_id', ''),
         'channel_name': metadata.get('channel_name', ''),
+
+        'youtube_published_at': metadata.get('youtube_published_at'),
+
         'timestamp': metadata.get('raw_timestamp'),
         'upload_date': metadata.get('raw_upload_date'),
         'release_timestamp': metadata.get('raw_release_timestamp'),
         'release_date': metadata.get('raw_release_date'),
+
         'publish_datetime': metadata.get('publish_datetime'),
         'publish_date': metadata.get('publish_date'),
         'publish_time': metadata.get('publish_time'),
+        'publish_source': metadata.get('publish_source'),
     }
     save_info_json(short_dir, prefix, info_data)
 
