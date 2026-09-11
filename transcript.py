@@ -11,7 +11,8 @@ No translation. Saves transcript text exactly as provided by YouTube.
 
 Raises TranscriptBlocked when YouTube is rate-limiting or IP-blocking the
 request. Callers must catch this to implement retry logic.
-All other failures are treated as "transcript unavailable" and do NOT raise.
+Normal transcript-unavailable conditions return "TRANSCRIPT UNAVAILABLE".
+Blocking and unexpected failures raise so the caller can retry safely.
 """
 
 
@@ -106,11 +107,16 @@ def get_transcript(video_id):
 
     except CouldNotRetrieveTranscript as e:
         err = str(e).lower()
-        if "blocked" in err or "ip" in err:
+        if (
+            "blocked" in err
+            or "ip" in err
+            or "too many requests" in err
+            or "429" in err
+        ):
             raise TranscriptBlocked(str(e)) from e
-        return "TRANSCRIPT UNAVAILABLE", False
+        raise
 
-    except Exception as e:
-        # Unknown error — treat as unavailable, do not raise
-        print(f"    [!] Transcript error: {e}")
-        return "TRANSCRIPT UNAVAILABLE", False
+    except Exception:
+        # Unknown failure is NOT proof that the transcript is unavailable.
+        # Let the caller retry instead of falsely writing UNAVAILABLE.
+        raise

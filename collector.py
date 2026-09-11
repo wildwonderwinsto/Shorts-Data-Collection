@@ -211,7 +211,6 @@ def process_short(
                 break
 
             except TranscriptBlocked:
-                # YouTube is rate-limiting — save progress, then wait and retry
                 save_state(channel_dir, state)
 
                 transcript_delay = min(
@@ -219,11 +218,28 @@ def process_short(
                     transcript_delay + TRANSCRIPT_DELAY_STEP,
                 )
 
-                print(f"IP BLOCKED")
+                print("IP BLOCKED")
                 print(
                     f"    Delay          {transcript_delay}s — retrying same video...",
                     flush=True,
                 )
+
+                time.sleep(transcript_delay)
+
+            except Exception as e:
+                save_state(channel_dir, state)
+
+                transcript_delay = min(
+                    TRANSCRIPT_MAX_DELAY,
+                    transcript_delay + TRANSCRIPT_DELAY_STEP,
+                )
+
+                print(f"RETRYABLE ERROR: {e}")
+                print(
+                    f"    Delay          {transcript_delay}s — retrying same video...",
+                    flush=True,
+                )
+
                 time.sleep(transcript_delay)
     else:
         print("    Transcript      SKIPPED")
