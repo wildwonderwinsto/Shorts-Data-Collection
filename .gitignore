@@ -1,0 +1,18 @@
+# Virtual Environment
+venv/
+env/
+.env
+
+# Python Cache
+__pycache__/
+*.pyc
+
+# Project Outputs
+YouTubeResearch/
+*_preview_grid.jpg
+*_transcript.txt
+*.csv
+
+# System
+.DS_Store
+Thumbs.db
