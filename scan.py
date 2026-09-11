@@ -224,10 +224,14 @@ def main():
 
     new_results = []
     total = len(to_process)
+    transcript_delay = 5  # starts at minimum; adapts during scan
 
     for idx, short_info in enumerate(to_process, 1):
         try:
-            result = process_short(short_info, channel_dir, state, args, idx, total)
+            result, transcript_delay = process_short(
+                short_info, channel_dir, state, args, idx, total,
+                transcript_delay,
+            )
             if result:
                 new_results.append(result)
         except KeyboardInterrupt:

@@ -38,7 +38,7 @@ from grid import (
     cleanup_frames,
     cleanup_downloads,
 )
-from transcript import get_transcript
+from transcript import get_transcript, TranscriptBlocked
 from state import (
     is_video_complete,
     mark_video_complete,
@@ -64,26 +64,42 @@ def _is_within_date_range(publish_date, start_date, end_date):
     return True
 
 
-def process_short(video_info, channel_dir, state, args, current_idx, total_count):
+def process_short(
+    video_info,
+    channel_dir,
+    state,
+    args,
+    current_idx,
+    total_count,
+    transcript_delay,
+):
     """
     Process a single Short: metadata, transcript, preview grid.
 
     Args:
-        video_info: dict with video_id, title, url, duration from listing
-        channel_dir: path to channel output directory
-        state: scan state dict
-        args: parsed CLI arguments
-        current_idx: current position (1-based) for display
-        total_count: total number of Shorts to process
+        video_info:       dict with video_id, title, url, duration from listing
+        channel_dir:      path to channel output directory
+        state:            scan state dict
+        args:             parsed CLI arguments
+        current_idx:      current position (1-based) for display
+        total_count:      total number of Shorts to process
+        transcript_delay: current adaptive delay in seconds (mutable via return)
 
     Returns:
-        dict with collected data for CSV generation, or None if skipped.
+        (result_dict | None, transcript_delay)
+        result_dict is None if the Short was skipped/failed.
+        transcript_delay is the updated delay after this Short.
     """
     video_id = video_info['video_id']
 
+    # Adaptive delay constants
+    TRANSCRIPT_MIN_DELAY = 5
+    TRANSCRIPT_MAX_DELAY = 120
+    TRANSCRIPT_DELAY_STEP = 5
+
     # Check if already complete (unless --force)
     if not args.force and is_video_complete(state, video_id):
-        return None  # Skip
+        return None, transcript_delay  # Skip
 
     # Assign number (preserves existing assignment if resuming)
     video_number = assign_number(state, video_id)
@@ -112,7 +128,7 @@ def process_short(video_info, channel_dir, state, args, current_idx, total_count
                 print(f"    [!] Metadata fetch failed: {e}")
                 mark_video_failed(state, video_id, video_number, f"metadata: {e}")
                 save_state(channel_dir, state)
-                return None
+                return None, transcript_delay
 
     metadata['video_number'] = video_number
     print("DONE")
@@ -135,7 +151,7 @@ def process_short(video_info, channel_dir, state, args, current_idx, total_count
             "status": "skipped_date",
         }
         save_state(channel_dir, state)
-        return None
+        return None, transcript_delay
 
     # ── Step 3: Create folder and save info.json ───────────────────────
     title = metadata.get('title', video_info.get('title', 'Untitled'))
@@ -168,15 +184,47 @@ def process_short(video_info, channel_dir, state, args, current_idx, total_count
     }
     save_info_json(short_dir, prefix, info_data)
 
-    # ── Step 4: Transcript ─────────────────────────────────────────────
+    # ── Step 4: Transcript (adaptive delay) ───────────────────────────
     transcript_available = False
     transcript_text = "TRANSCRIPT UNAVAILABLE"
 
     if not args.skip_transcripts:
-        print("    Transcript     ", end="", flush=True)
-        transcript_text, transcript_available = get_transcript(video_id)
-        if not transcript_available:
-            print("UNAVAILABLE")
+        # Inter-video delay before requesting transcript
+        if transcript_delay > 0:
+            time.sleep(transcript_delay)
+
+        while True:
+            print("    Transcript     ", end="", flush=True)
+            try:
+                transcript_text, transcript_available = get_transcript(video_id)
+
+                # Request succeeded (transcript or UNAVAILABLE) — lower delay
+                transcript_delay = max(
+                    TRANSCRIPT_MIN_DELAY,
+                    transcript_delay - TRANSCRIPT_DELAY_STEP,
+                )
+
+                if transcript_available:
+                    print(f"DONE  (next delay {transcript_delay}s)")
+                else:
+                    print(f"UNAVAILABLE  (next delay {transcript_delay}s)")
+                break
+
+            except TranscriptBlocked:
+                # YouTube is rate-limiting — save progress, then wait and retry
+                save_state(channel_dir, state)
+
+                transcript_delay = min(
+                    TRANSCRIPT_MAX_DELAY,
+                    transcript_delay + TRANSCRIPT_DELAY_STEP,
+                )
+
+                print(f"IP BLOCKED")
+                print(
+                    f"    Delay          {transcript_delay}s — retrying same video...",
+                    flush=True,
+                )
+                time.sleep(transcript_delay)
     else:
         print("    Transcript      SKIPPED")
 
@@ -278,9 +326,10 @@ def process_short(video_info, channel_dir, state, args, current_idx, total_count
         'publish_time': metadata.get('publish_time', ''),
         'duration_seconds': metadata.get('duration_seconds', ''),
         'transcript_available': transcript_available,
+        'transcript': transcript_text,
         'folder_path': short_dir,
         'transcript_path': transcript_path,
         'preview_grid_path': grid_path_str,
     }
 
-    return result
+    return result, transcript_delay

@@ -8,24 +8,50 @@ Priority order:
 
 No Whisper. No speech-to-text. No audio transcription.
 No translation. Saves transcript text exactly as provided by YouTube.
+
+Raises TranscriptBlocked when YouTube is rate-limiting or IP-blocking the
+request. Callers must catch this to implement retry logic.
+All other failures are treated as "transcript unavailable" and do NOT raise.
 """
 
 
-def fetch_youtube_transcript(video_id):
+class TranscriptBlocked(Exception):
     """
-    Fetch transcript from YouTube captions using public API only.
+    Raised when YouTube blocks the transcript request via rate-limiting or
+    IP blocking. Distinguished from a missing transcript so the caller can
+    retry the same video after a delay, rather than moving on.
+    """
+    pass
 
-    Iterates the available transcript list via the public iterator.
+
+def get_transcript(video_id):
+    """
+    Fetch transcript from YouTube captions using the public API only.
+
     Prefers manually created transcripts over auto-generated ones.
     Accepts any language — does not translate.
 
-    Returns transcript text or None if unavailable.
+    Returns: (transcript_text, is_available)
+      - transcript_text: full transcript string, or "TRANSCRIPT UNAVAILABLE"
+      - is_available:    True if a real transcript was obtained
+
+    Raises:
+      TranscriptBlocked — YouTube is rate-limiting / IP-blocking. Caller
+                          must wait and retry the SAME video.
     """
     try:
         from youtube_transcript_api import YouTubeTranscriptApi
+        from youtube_transcript_api._errors import (
+            IpBlocked,
+            RequestBlocked,
+            VideoUnavailable,
+            NoTranscriptFound,
+            TranscriptsDisabled,
+            CouldNotRetrieveTranscript,
+        )
     except ImportError:
         print("    [!] youtube-transcript-api not installed.")
-        return None
+        return "TRANSCRIPT UNAVAILABLE", False
 
     try:
         ytt_api = YouTubeTranscriptApi()
@@ -49,9 +75,10 @@ def fetch_youtube_transcript(video_id):
             transcript = generated_transcripts[0]
 
         if transcript is None:
-            return None
+            # No transcripts exist — this is a normal, non-blocked outcome
+            return "TRANSCRIPT UNAVAILABLE", False
 
-        # Fetch the actual transcript data
+        # Fetch the actual transcript segments
         fetched = transcript.fetch()
 
         text_parts = []
@@ -63,27 +90,27 @@ def fetch_youtube_transcript(video_id):
             text_parts.append(text)
 
         full_text = ' '.join(text_parts).strip()
-        return full_text if full_text else None
+
+        if full_text:
+            return full_text, True
+
+        return "TRANSCRIPT UNAVAILABLE", False
+
+    except (IpBlocked, RequestBlocked) as e:
+        # YouTube is blocking requests — caller must retry with a delay
+        raise TranscriptBlocked(str(e)) from e
+
+    except (NoTranscriptFound, TranscriptsDisabled, VideoUnavailable):
+        # Legitimate "no transcript" cases — not a block
+        return "TRANSCRIPT UNAVAILABLE", False
+
+    except CouldNotRetrieveTranscript as e:
+        err = str(e).lower()
+        if "blocked" in err or "ip" in err:
+            raise TranscriptBlocked(str(e)) from e
+        return "TRANSCRIPT UNAVAILABLE", False
 
     except Exception as e:
-        print(f"    [!] YouTube transcript fetch failed: {e}")
-        return None
-
-
-def get_transcript(video_id):
-    """
-    Main transcript fetching function.
-
-    Tries YouTube captions only (manual then auto-generated, any language).
-    If none available, returns "TRANSCRIPT UNAVAILABLE".
-
-    Returns: (transcript_text, is_available)
-      - transcript_text: the transcript string
-      - is_available: True if a real transcript was obtained
-    """
-    transcript = fetch_youtube_transcript(video_id)
-    if transcript:
-        print("DONE")
-        return transcript, True
-
-    return "TRANSCRIPT UNAVAILABLE", False
+        # Unknown error — treat as unavailable, do not raise
+        print(f"    [!] Transcript error: {e}")
+        return "TRANSCRIPT UNAVAILABLE", False
